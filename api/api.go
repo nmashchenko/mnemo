@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"mnemo/clog"
 	"mnemo/config"
 	"mnemo/deps"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"time"
@@ -39,6 +41,20 @@ func New(cfg *config.Config, d *deps.Dependencies, version string) (*API, error)
 	if d == nil {
 		return nil, errors.New("deps cannot be nil")
 	}
+
+	// launch on local network so ppl can connect
+	ip, err := externalIP()
+	if err != nil {
+		return nil, fmt.Errorf("cannot auto-detect LAN IP: %w", err)
+	}
+
+	_, port, err := net.SplitHostPort(cfg.APIListenAddress)
+	if err != nil {
+		return nil, fmt.Errorf("invalid APIListenAddress: %w", err)
+	}
+
+	cfg.APIListenAddress = net.JoinHostPort(ip, port)
+	fmt.Println("listening on", cfg.APIListenAddress)
 
 	server := &http.Server{
 		Addr: cfg.APIListenAddress,
@@ -80,6 +96,7 @@ func (a *API) Run() error {
 
 	router.HandlerFunc(http.MethodGet, "/health-check", a.healthCheckHandler)
 	router.HandlerFunc(http.MethodGet, "/version", a.versionHandler)
+	// TODO: this needs to be protected by jwt token
 	router.HandlerFunc(http.MethodPost, "/api/v1/qr", a.createQRCodeHandler)
 	router.HandlerFunc(http.MethodGet, "/api/v1/join", a.joinHubHandler)
 
