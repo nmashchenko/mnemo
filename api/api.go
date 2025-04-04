@@ -96,10 +96,8 @@ func (a *API) Run() error {
 
 	router.HandlerFunc(http.MethodGet, "/health-check", a.healthCheckHandler)
 	router.HandlerFunc(http.MethodGet, "/version", a.versionHandler)
-	// TODO: this needs to be protected by jwt token
-	router.HandlerFunc(http.MethodPost, "/api/v1/qr", a.createQRCodeHandler)
-	router.HandlerFunc(http.MethodGet, "/api/v1/join", a.joinHubHandler)
 
+	router.HandlerFunc(http.MethodGet, "/ws", a.deps.WebsocketManager.ServeWs)
 	// Maybe enable profiling
 	if a.config.EnablePprof {
 		router.Handler(http.MethodGet, "/debug/pprof/*item", http.DefaultServeMux)

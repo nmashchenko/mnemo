@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"mnemo/clog"
-	websocket "mnemo/services/ws"
+	"mnemo/services/ws"
 	"os"
 	"strconv"
 	"strings"
@@ -25,7 +25,7 @@ type customCheck struct{}
 
 type Dependencies struct {
 	// Services
-	WebsocketHubService *websocket.Hub
+	WebsocketManager *ws.Manager
 
 	Health health.IHealth
 
@@ -151,11 +151,8 @@ func (d *Dependencies) setupServices(cfg *config.Config) error {
 
 	logger.Debug("Setting up hub service")
 
-	hubService := websocket.NewHub()
-	d.WebsocketHubService = hubService
-
-	// spawning goroutine for hub
-	go d.WebsocketHubService.Run()
+	manager := ws.NewManager()
+	d.WebsocketManager = manager
 
 	return nil
 }

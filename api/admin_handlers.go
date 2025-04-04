@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/base64"
 	"github.com/skip2/go-qrcode"
-	"mnemo/services/ws"
 	"net/http"
 )
 
@@ -26,6 +25,6 @@ func (a *API) createQRCodeHandler(wr http.ResponseWriter, r *http.Request) {
 	WriteJSON(wr, resp, http.StatusOK)
 }
 
-func (a *API) joinHubHandler(wr http.ResponseWriter, r *http.Request) {
-	ws.ServeWs(a.deps.WebsocketHubService, wr, r)
-}
+//func (a *API) joinHubHandler(wr http.ResponseWriter, r *http.Request) {
+//	ws.ServeWs(a.deps.WebsocketHubService, wr, r)
+//}

@@ -1,133 +1,127 @@
 package ws
 
 import (
-	"bytes"
-	"log"
-	"net/http"
-	"time"
-
+	"encoding/json"
 	"github.com/gorilla/websocket"
-)
-
-const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-
-	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	"log"
+	"time"
 )
 
 var (
-	newline = []byte{'\n'}
-	space   = []byte{' '}
+	pongWait = 10 * time.Second
+	// 90% of pongWait
+	pingInterval = (pongWait * 9) / 10
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
+type ClientList map[*Client]bool
 
-// Client is a middleman between the websocket connection and the hub.
 type Client struct {
-	hub *Hub
+	connection *websocket.Conn
+	manager    *Manager
 
-	// The websocket connection.
-	conn *websocket.Conn
-
-	// Buffered channel of outbound messages.
-	send chan []byte
+	// egress is used to avoid concurrent writes on the ws connection
+	egress chan Event
 }
 
-// readPump pumps messages from the websocket connection to the hub.
-//
-// The application runs readPump in a per-connection goroutine. The application
-// ensures that there is at most one reader on a connection by executing all
-// reads from this goroutine.
-func (c *Client) readPump() {
-	defer func() {
-		c.hub.unregister <- c
-		c.conn.Close()
-	}()
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-	for {
-		_, message, err := c.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
-			}
-			break
-		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		c.hub.broadcast <- message
+func NewClient(conn *websocket.Conn, manager *Manager) *Client {
+	return &Client{
+		connection: conn,
+		manager:    manager,
+		egress:     make(chan Event),
 	}
 }
 
-// writePump pumps messages from the hub to the websocket connection.
-//
-// A goroutine running writePump is started for each connection. The
-// application ensures that there is at most one writer to a connection by
-// executing all writes from this goroutine.
-func (c *Client) writePump() {
-	ticker := time.NewTicker(pingPeriod)
+func (c *Client) readMessages() {
 	defer func() {
-		ticker.Stop()
-		c.conn.Close()
+		// cleanup connection
+		c.manager.removeClient(c)
 	}()
-	for {
-		select {
-		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Add queued chat messages to the current websocket message.
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write(newline)
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// ServeWs handles websocket requests from the peer.
-func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
+	if err := c.connection.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
 		log.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
-	client.hub.register <- client
 
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
-	go client.writePump()
-	go client.readPump()
+	// 512 bytes limit
+	c.connection.SetReadLimit(512)
+
+	c.connection.SetPongHandler(c.pongHandler)
+
+	for {
+		_, payload, err := c.connection.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error reading message: %v", err)
+			}
+			break
+		}
+
+		var request Event
+
+		if err := json.Unmarshal(payload, &request); err != nil {
+			log.Printf("error marshalling event: %v", err)
+
+			//TODO: possible break
+		}
+
+		/**
+		Possible payload here:
+		
+		{
+		    "type": "send_message",
+		    "payload": {
+		        "from": "student",
+		        "message": "hello"
+		    }
+		}
+		*/
+		if err := c.manager.routeEvent(request, c); err != nil {
+			log.Printf("error handling event: %v", err)
+		}
+
+	}
+}
+
+func (c *Client) writeMessages() {
+	defer func() {
+		// cleanup connection
+		c.manager.removeClient(c)
+	}()
+
+	ticker := time.NewTicker(pingInterval)
+
+	for {
+		select {
+		case message, ok := <-c.egress:
+			if !ok {
+				if err := c.connection.WriteMessage(websocket.CloseMessage, nil); err != nil {
+					log.Println("connection closed:", err)
+				}
+				return
+			}
+
+			data, err := json.Marshal(message)
+			if err != nil {
+				log.Println("error marshalling message:", err)
+				return
+			}
+
+			if err := c.connection.WriteMessage(websocket.TextMessage, data); err != nil {
+				log.Println("failed send message:", err)
+			}
+			log.Println("message sent")
+		case <-ticker.C:
+			log.Println("ping")
+			// send ping to client to keep connection alive
+			if err := c.connection.WriteMessage(websocket.PingMessage, []byte(``)); err != nil {
+				log.Println("failed sending ping:", err)
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) pongHandler(pongMsg string) error {
+	log.Println("pong")
+	return c.connection.SetReadDeadline(time.Now().Add(pongWait))
 }
