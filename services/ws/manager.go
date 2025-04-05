@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// note: hack for now (this is stupid)
+const professorAPIKey = "my_secret_key"
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -59,9 +62,26 @@ func SendMessage(event Event, c *Client) error {
 		Type:    EventNewMessage,
 	}
 
-	// broadcast message
-	for client := range c.manager.clients {
-		client.egress <- outgoingEvent
+	// acquire read lock to safely iterate over the clients map.
+	c.manager.sync.RLock()
+	defer c.manager.sync.RUnlock()
+
+	if c.role == RoleProfessor {
+		// case 1: professor should be able to stream questions to students
+		for client := range c.manager.clients {
+			if client.role == RoleStudent {
+				sendWithRetry(client.egress, outgoingEvent)
+			}
+		}
+	} else if c.role == RoleStudent {
+		// students should only stream back responses to professor
+		for client := range c.manager.clients {
+			if client.role == RoleProfessor {
+				sendWithRetry(client.egress, outgoingEvent)
+			}
+		}
+	} else {
+		return fmt.Errorf("unknown client role: %s", c.role)
 	}
 
 	return nil
@@ -81,16 +101,23 @@ func (m *Manager) routeEvent(event Event, c *Client) error {
 }
 
 func (m *Manager) ServeWs(w http.ResponseWriter, r *http.Request) {
-	log.Println("new connection")
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	client := NewClient(conn, m)
+	// Check for x-api-key header. If it matches, assign professor role.
+	apiKey := r.Header.Get("x-api-key")
+	role := RoleStudent
+	if apiKey == professorAPIKey {
+		role = RoleProfessor
+	}
+
+	client := NewClient(conn, m, role)
 
 	m.addClient(client)
+	fmt.Printf("%s connected\n", client.role)
 
 	go client.readMessages()
 	go client.writeMessages()
@@ -110,17 +137,5 @@ func (m *Manager) removeClient(client *Client) {
 	if _, ok := m.clients[client]; ok {
 		client.connection.Close()
 		delete(m.clients, client)
-	}
-}
-
-func checkOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-
-	switch origin {
-	// TODO: change this
-	case "100.73.83.66:8080":
-		return true
-	default:
-		return false
 	}
 }

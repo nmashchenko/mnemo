@@ -15,18 +15,25 @@ var (
 
 type ClientList map[*Client]bool
 
+const (
+	RoleProfessor = "professor"
+	RoleStudent   = "student"
+)
+
 type Client struct {
 	connection *websocket.Conn
 	manager    *Manager
+	role       string // "professor" or "student"
 
 	// egress is used to avoid concurrent writes on the ws connection
 	egress chan Event
 }
 
-func NewClient(conn *websocket.Conn, manager *Manager) *Client {
+func NewClient(conn *websocket.Conn, manager *Manager, role string) *Client {
 	return &Client{
 		connection: conn,
 		manager:    manager,
+		role:       role,
 		egress:     make(chan Event),
 	}
 }
@@ -66,7 +73,7 @@ func (c *Client) readMessages() {
 
 		/**
 		Possible payload here:
-		
+
 		{
 		    "type": "send_message",
 		    "payload": {
